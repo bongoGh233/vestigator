@@ -12,7 +12,7 @@ services:
   - type: web
     name: vestigator
     runtime: node
-    repo: https://github.com/YOUR_USERNAME/vestigator
+    repo: https://github.com/bongoGh233/vestigator
     plan: free
     healthCheckPath: /health
     buildCommand: npm ci && npm run build
