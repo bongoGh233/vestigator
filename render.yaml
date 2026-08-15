@@ -1,0 +1,50 @@
+# Render Blueprint — deploy Vestigator as a single always-on web service
+# (API + WebSocket + built React client on one port).
+#
+#  1. Push this repo to GitHub (or GitLab).
+#  2. On Render: New > Blueprint  ->  connect your repo. Everything below
+#     is applied automatically and you get a free https://vestigator.onrender.com.
+#
+# The free tier uses an ephemeral filesystem, so the SQLite DB is lost on
+# restart/redeploy. To keep data across deploys, switch plan to starter and
+# uncomment the disk block below (data then lives at /var/data).
+services:
+  - type: web
+    name: vestigator
+    runtime: node
+    repo: https://github.com/YOUR_USERNAME/vestigator
+    plan: free
+    healthCheckPath: /health
+    buildCommand: npm ci && npm run build
+    startCommand: node server/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_URL
+        value: https://vestigator.onrender.com
+      - key: DATA_DIR
+        value: /var/data
+      - key: ARRIVE_THRESHOLD_M
+        value: "80"
+      - key: TRACK_CODE_TTL_MIN
+        value: "10"
+      - key: OSRM_SERVER
+        value: https://router.project-osrm.org
+      # Set these in the Render dashboard after deploy (Environment tab):
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+    # Persistent disk — requires a paid (starter+) instance:
+    # disk:
+    #   name: vestigator-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
