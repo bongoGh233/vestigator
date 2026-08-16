@@ -48,7 +48,6 @@ db.exec(`
     status       TEXT NOT NULL DEFAULT 'pending',
     created_at   INTEGER NOT NULL,
     person_online INTEGER NOT NULL DEFAULT 0,
-    simulating   INTEGER NOT NULL DEFAULT 0,
     location     TEXT,
     path         TEXT NOT NULL DEFAULT '[]'
   );
@@ -98,7 +97,7 @@ const stmts = {
   deleteSession: db.prepare("DELETE FROM sessions WHERE token_hash = ?"),
   deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE expires_at < ?"),
   insertBooking: db.prepare(
-    "INSERT INTO bookings (id, user_id, share_token, code, person_name, phone, note, pickup, destination, status, created_at, person_online, simulating, location, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO bookings (id, user_id, share_token, code, person_name, phone, note, pickup, destination, status, created_at, person_online, location, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ),
   findBookingById: db.prepare("SELECT * FROM bookings WHERE id = ?"),
   findBookingByUser: db.prepare(
@@ -107,10 +106,13 @@ const stmts = {
   listBookingsByUser: db.prepare(
     "SELECT * FROM bookings WHERE user_id = ? ORDER BY created_at DESC"
   ),
+  listBookingsByUserPage: db.prepare(
+    "SELECT * FROM bookings WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+  ),
   updateBooking: db.prepare(`
     UPDATE bookings SET
       person_name = ?, phone = ?, note = ?, pickup = ?, destination = ?,
-      status = ?, person_online = ?, simulating = ?, location = ?, path = ?
+      status = ?, person_online = ?, location = ?, path = ?
     WHERE id = ?
   `),
   deleteBooking: db.prepare("DELETE FROM bookings WHERE id = ?"),
@@ -138,6 +140,9 @@ const stmts = {
   findProfileByCode: db.prepare("SELECT * FROM profiles WHERE track_code = ?"),
   listActiveProfiles: db.prepare(
     "SELECT * FROM profiles WHERE is_active = 1 AND listed = 1 AND user_id != ? ORDER BY created_at DESC"
+  ),
+  listActiveProfilesPage: db.prepare(
+    "SELECT * FROM profiles WHERE is_active = 1 AND listed = 1 AND user_id != ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
   ),
   listExpiredCodes: db.prepare("SELECT id FROM profiles WHERE code_expires_at < ?"),
 };

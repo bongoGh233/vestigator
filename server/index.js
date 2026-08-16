@@ -45,7 +45,14 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(cors({ origin: allowedOrigins(), credentials: true }));
 app.use(securityHeaders);
-app.use(express.json({ limit: "10kb" }));
+// Default to a strict 10kb body cap everywhere except POST /api/profile,
+// which legitimately carries base64 avatars (up to 250 KB → ~333 KB body).
+const jsonSmall = express.json({ limit: "10kb" });
+const jsonAvatar = express.json({ limit: "512kb" });
+app.use((req, res, next) => {
+  const parser = req.method === "POST" && req.path === "/api/profile" ? jsonAvatar : jsonSmall;
+  parser(req, res, next);
+});
 app.use(attachUser);
 app.use(originGuard);
 
@@ -157,6 +164,18 @@ function sanitizeProfileInput(body) {
 
 // ---------------- Booking helpers ----------------
 
+function pageParams(req, maxLimit = 100) {
+  const rawLimit = Number(req.query.limit);
+  const rawOffset = Number(req.query.offset);
+  const limit =
+    Number.isFinite(rawLimit) && rawLimit >= 1
+      ? Math.min(Math.floor(rawLimit), maxLimit)
+      : maxLimit;
+  const offset =
+    Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 0;
+  return { limit, offset };
+}
+
 function makeId() {
   return crypto.randomBytes(6).toString("hex");
 }
@@ -180,7 +199,6 @@ function createBooking(userId, data) {
     status: "pending",
     created_at: now,
     person_online: 0,
-    simulating: 0,
     location: null,
     path: [],
   };
@@ -197,7 +215,6 @@ function createBooking(userId, data) {
     booking.status,
     booking.created_at,
     booking.person_online,
-    booking.simulating,
     null,
     JSON.stringify([])
   );
@@ -213,7 +230,6 @@ function fromRow(row) {
     location: row.location ? JSON.parse(row.location) : null,
     path: row.path ? JSON.parse(row.path) : [],
     person_online: !!row.person_online,
-    simulating: !!row.simulating,
   };
 }
 
@@ -226,7 +242,6 @@ function saveBooking(b) {
     b.destination ? JSON.stringify(b.destination) : null,
     b.status,
     b.person_online ? 1 : 0,
-    b.simulating ? 1 : 0,
     b.location ? JSON.stringify(b.location) : null,
     JSON.stringify(b.path),
     b.id
@@ -283,7 +298,10 @@ function haversine(a, b) {
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Google-Maps-style road routing via OSRM (free, no API key). Cached server-side.
-app.get("/api/route", async (req, res) => {
+app.get(
+  "/api/route",
+  rateLimit({ windowMs: 60 * 1000, max: 60, keyBy: (req) => `route:${req.ip}` }),
+  async (req, res) => {
   const { from, to } = req.query;
   const parse = (s) => {
     if (!s) return null;
@@ -452,7 +470,8 @@ app.post(
 );
 
 app.get("/api/bookings", requireAuth, (req, res) => {
-  const rows = stmts.listBookingsByUser.all(req.userId);
+  const { limit, offset } = pageParams(req);
+  const rows = stmts.listBookingsByUserPage.all(req.userId, limit, offset);
   res.json(rows.map((r) => toPublic(fromRow(r))));
 });
 
@@ -505,10 +524,11 @@ app.get("/api/share/:id", (req, res) => {
 
 // ---------------- Trackable profiles ----------------
 
-app.get("/api/profiles", requireAuth, (_req, res) => {
-  const rows = stmts.listActiveProfiles.all(_req.userId);
+app.get("/api/profiles", requireAuth, (req, res) => {
+  const { limit, offset } = pageParams(req);
+  const rows = stmts.listActiveProfilesPage.all(req.userId, limit, offset);
   const list = rows.map((r) => publicProfile(fromProfileRow(r)));
-  const own = fromProfileRow(stmts.findProfileByUser.get(_req.userId));
+  const own = fromProfileRow(stmts.findProfileByUser.get(req.userId));
   if (own && own.is_active && own.listed) {
     list.unshift({ ...publicProfile(own), isOwn: true });
   }
@@ -663,6 +683,22 @@ io.on("connection", (socket) => {
     b.status = "cancelled";
     saveBooking(b);
     io.to(`watch:${bookingId}`).emit("booking:cancelled", toPublic(b));
+    broadcast(b);
+  });
+
+  // Owner confirms the person has arrived (additive — the person can still
+  // self-report via arrival:update, and auto-arrival still fires on distance).
+  socket.on("booking:arrived", ({ bookingId }) => {
+    if (!socket.userId) return;
+    const b = fromRow(stmts.findBookingByUser.get(bookingId, socket.userId));
+    if (!b) return;
+    b.status = "arrived";
+    saveBooking(b);
+    const pub = toPublic(b);
+    const personSet = personSockets.get(bookingId);
+    if (personSet) {
+      for (const sid of personSet) io.to(sid).emit("person:arrived", pub);
+    }
     broadcast(b);
   });
 

@@ -133,6 +133,30 @@ async function main() {
   check("person location update accepted", r.status === 200 && !!r.data.location, JSON.stringify(r.data?.location || null));
   pws.close();
 
+  // Owner-confirmed arrival (booking:arrived) reaches the person socket
+  r = await request("/api/bookings", {
+    method: "POST",
+    cookie: cookie2,
+    csrf,
+    body: { personName: "Ada Lovelace", pickup: { lat: 6.5, lng: 3.4 }, destination: { lat: 6.55, lng: 3.45 } },
+  });
+  check("second booking for owner-arrival test", r.status === 201, `status=${r.status}`);
+  const b2 = r.data;
+  const ownerWs = io(BASE, { transports: ["websocket"], extraHeaders: { Cookie: cookie2 } });
+  await new Promise((res) => ownerWs.on("connect", res));
+  const person2 = io(BASE, { transports: ["websocket"] });
+  await new Promise((res) => person2.on("connect", res));
+  person2.emit("person:join", { bookingId: b2.id, token: b2.shareToken, personName: "Ada L" });
+  await new Promise((res) => setTimeout(res, 300));
+  const gotArrived = new Promise((resolve) => person2.on("person:arrived", () => resolve(true)));
+  ownerWs.emit("booking:arrived", { bookingId: b2.id });
+  const notified = await Promise.race([gotArrived, new Promise((_, rej) => setTimeout(() => rej(new Error("arrival notify timeout")), 10000))]);
+  check("owner-confirmed arrival notifies person socket", notified === true);
+  r = await request(`/api/bookings/${b2.id}`, { cookie: cookie2 });
+  check("owner-confirmed arrival sets status", r.status === 200 && r.data.status === "arrived", `status=${r.status}`);
+  ownerWs.close();
+  person2.close();
+
   const anon = io(BASE, { transports: ["websocket"] });
   await new Promise((res) => anon.on("connect", res));
   let anonResult = null;
