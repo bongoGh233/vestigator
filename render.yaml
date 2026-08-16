@@ -15,7 +15,10 @@ services:
     repo: https://github.com/bongoGh233/vestigator
     plan: free
     healthCheckPath: /health
-    buildCommand: npm ci && npm run build
+    # NODE_ENV=production is set below and applies during the build too, so
+    # plain `npm ci` would skip devDependencies (vite) and the client build
+    # would fail with "vite: not found". --include=dev keeps them for the build.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node server/index.js
     envVars:
       - key: NODE_VERSION
