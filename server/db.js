@@ -1,150 +1,224 @@
-import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { PrismaClient } from "@prisma/client";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.DATA_DIR || `${__dirname}/data`;
-mkdirSync(DATA_DIR, { recursive: true });
+// Load a local .env (gitignored) when the platform doesn't inject env vars
+// directly (Render/Supabase set DATABASE_URL themselves). No-op if already set.
+if (!process.env.DATABASE_URL && typeof process.loadEnvFile === "function") {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [join(here, ".env"), join(here, "..", ".env"), join(process.cwd(), ".env")]) {
+    if (existsSync(candidate)) {
+      try {
+        process.loadEnvFile(candidate);
+      } catch {
+        /* best effort */
+      }
+      break;
+    }
+  }
+}
 
-export const db = new DatabaseSync(`${DATA_DIR}/vestigator.db`);
+// PostgreSQL (Supabase) access via Prisma. The rest of the app only ever sees
+// plain JS values in the same shapes the old SQLite layer produced:
+//   - timestamps:   ms numbers (Prisma BIGINT is converted to Number)
+//   - booleans:     0/1 (Prisma BOOLEAN is converted to 0/1)
+//   - JSON-ish cols: raw strings (pickup/destination/location/path/skills are
+//     still JSON.parse'd in server/index.js, exactly as before)
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA foreign_keys = ON;
-  PRAGMA busy_timeout = 5000;
+export const prisma = new PrismaClient();
 
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    name          TEXT NOT NULL,
-    email         TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    failed_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until  INTEGER
-  );
+const BIG = (v) => (v == null ? null : BigInt(v));
+const NUM = (v) => (v == null ? null : Number(v));
+const toBool = (v) => !!v;
+const to01 = (v) => (v ? 1 : 0);
 
-  CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    csrf       TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    ip         TEXT,
-    user_agent TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+function userOut(u) {
+  if (!u) return u;
+  return { ...u, created_at: NUM(u.created_at), locked_until: NUM(u.locked_until) };
+}
 
-  CREATE TABLE IF NOT EXISTS bookings (
-    id           TEXT PRIMARY KEY,
-    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    share_token  TEXT NOT NULL,
-    code         TEXT NOT NULL,
-    person_name  TEXT NOT NULL,
-    phone        TEXT NOT NULL DEFAULT '',
-    note         TEXT NOT NULL DEFAULT '',
-    pickup       TEXT,
-    destination  TEXT,
-    status       TEXT NOT NULL DEFAULT 'pending',
-    created_at   INTEGER NOT NULL,
-    person_online INTEGER NOT NULL DEFAULT 0,
-    location     TEXT,
-    path         TEXT NOT NULL DEFAULT '[]'
-  );
-  CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
+function sessionOut(s) {
+  if (!s) return s;
+  return { ...s, created_at: NUM(s.created_at), expires_at: NUM(s.expires_at) };
+}
 
-  CREATE TABLE IF NOT EXISTS password_resets (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token_hash TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_resets_user ON password_resets(user_id);
+function bookingOut(b) {
+  if (!b) return b;
+  return { ...b, created_at: NUM(b.created_at), person_online: to01(b.person_online) };
+}
 
-  CREATE TABLE IF NOT EXISTS profiles (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-    name            TEXT NOT NULL,
-    bio             TEXT NOT NULL DEFAULT '',
-    skills          TEXT NOT NULL DEFAULT '[]',
-    avatar          TEXT,
-    phone           TEXT NOT NULL DEFAULT '',
-    city            TEXT NOT NULL DEFAULT '',
-    listed          INTEGER NOT NULL DEFAULT 1,
-    is_active       INTEGER NOT NULL DEFAULT 1,
-    track_code      TEXT NOT NULL,
-    code_expires_at INTEGER NOT NULL,
-    created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_profiles_code ON profiles(track_code);
-`);
+function profileOut(p) {
+  if (!p) return p;
+  return {
+    ...p,
+    created_at: NUM(p.created_at),
+    updated_at: NUM(p.updated_at),
+    code_expires_at: NUM(p.code_expires_at),
+    listed: to01(p.listed),
+    is_active: to01(p.is_active),
+  };
+}
 
 const stmts = {
-  insertUser: db.prepare(
-    "INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)"
-  ),
-  findUserByEmail: db.prepare("SELECT * FROM users WHERE email = ?"),
-  findUserById: db.prepare("SELECT * FROM users WHERE id = ?"),
-  updateUserAttempts: db.prepare(
-    "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?"
-  ),
-  insertSession: db.prepare(
-    "INSERT INTO sessions (token_hash, user_id, csrf, created_at, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ),
-  findSession: db.prepare("SELECT * FROM sessions WHERE token_hash = ?"),
-  deleteSession: db.prepare("DELETE FROM sessions WHERE token_hash = ?"),
-  deleteExpiredSessions: db.prepare("DELETE FROM sessions WHERE expires_at < ?"),
-  insertBooking: db.prepare(
-    "INSERT INTO bookings (id, user_id, share_token, code, person_name, phone, note, pickup, destination, status, created_at, person_online, location, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-  ),
-  findBookingById: db.prepare("SELECT * FROM bookings WHERE id = ?"),
-  findBookingByUser: db.prepare(
-    "SELECT * FROM bookings WHERE id = ? AND user_id = ?"
-  ),
-  listBookingsByUser: db.prepare(
-    "SELECT * FROM bookings WHERE user_id = ? ORDER BY created_at DESC"
-  ),
-  listBookingsByUserPage: db.prepare(
-    "SELECT * FROM bookings WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-  ),
-  updateBooking: db.prepare(`
-    UPDATE bookings SET
-      person_name = ?, phone = ?, note = ?, pickup = ?, destination = ?,
-      status = ?, person_online = ?, location = ?, path = ?
-    WHERE id = ?
-  `),
-  deleteBooking: db.prepare("DELETE FROM bookings WHERE id = ?"),
-  clearAllOnline: db.prepare("UPDATE bookings SET person_online = 0"),
-  insertReset: db.prepare(
-    "INSERT INTO password_resets (user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)"
-  ),
-  findReset: db.prepare("SELECT * FROM password_resets WHERE token_hash = ?"),
-  deleteReset: db.prepare("DELETE FROM password_resets WHERE token_hash = ?"),
-  deleteResetsForUser: db.prepare("DELETE FROM password_resets WHERE user_id = ?"),
-  updateUserPassword: db.prepare("UPDATE users SET password_hash = ? WHERE id = ?"),
-  deleteAllSessions: db.prepare("DELETE FROM sessions WHERE user_id = ?"),
-  insertProfile: db.prepare(`
-    INSERT INTO profiles (user_id, name, bio, skills, avatar, phone, city, listed, is_active, track_code, code_expires_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `),
-  updateProfile: db.prepare(`
-    UPDATE profiles SET name = ?, bio = ?, skills = ?, avatar = ?, phone = ?, city = ?, listed = ?, is_active = ?, updated_at = ? WHERE id = ?
-  `),
-  updateProfileCode: db.prepare(
-    "UPDATE profiles SET track_code = ?, code_expires_at = ? WHERE id = ?"
-  ),
-  findProfileById: db.prepare("SELECT * FROM profiles WHERE id = ?"),
-  findProfileByUser: db.prepare("SELECT * FROM profiles WHERE user_id = ?"),
-  findProfileByCode: db.prepare("SELECT * FROM profiles WHERE track_code = ?"),
-  listActiveProfiles: db.prepare(
-    "SELECT * FROM profiles WHERE is_active = 1 AND listed = 1 AND user_id != ? ORDER BY created_at DESC"
-  ),
-  listActiveProfilesPage: db.prepare(
-    "SELECT * FROM profiles WHERE is_active = 1 AND listed = 1 AND user_id != ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-  ),
-  listExpiredCodes: db.prepare("SELECT id FROM profiles WHERE code_expires_at < ?"),
+  // ---- health ----
+  ping: () => prisma.$queryRaw`SELECT 1`,
+
+  // ---- users ----
+  insertUser: (name, email, passwordHash, createdAt) =>
+    prisma.user
+      .create({
+        data: { name, email, password_hash: passwordHash, created_at: BIG(createdAt) },
+      })
+      .then(userOut),
+  findUserByEmail: (email) => prisma.user.findUnique({ where: { email } }).then(userOut),
+  findUserById: (id) => prisma.user.findUnique({ where: { id } }).then(userOut),
+  updateUserAttempts: (failedAttempts, lockedUntil, id) =>
+    prisma.user.update({
+      where: { id },
+      data: { failed_attempts: failedAttempts, locked_until: BIG(lockedUntil) },
+    }),
+  updateUserPassword: (passwordHash, id) =>
+    prisma.user.update({ where: { id }, data: { password_hash: passwordHash } }),
+
+  // ---- sessions ----
+  insertSession: ({ tokenHash, userId, csrf, createdAt, expiresAt, ip, userAgent }) =>
+    prisma.session.create({
+      data: {
+        token_hash: tokenHash,
+        user_id: userId,
+        csrf,
+        created_at: BIG(createdAt),
+        expires_at: BIG(expiresAt),
+        ip,
+        user_agent: userAgent,
+      },
+    }),
+  findSession: (tokenHash) => prisma.session.findUnique({ where: { token_hash: tokenHash } }).then(sessionOut),
+  deleteSession: (tokenHash) => prisma.session.deleteMany({ where: { token_hash: tokenHash } }),
+  deleteExpiredSessions: (now) =>
+    prisma.session.deleteMany({ where: { expires_at: { lt: BIG(now) } } }),
+  deleteAllSessions: (userId) => prisma.session.deleteMany({ where: { user_id: userId } }),
+
+  // ---- bookings ----
+  insertBooking: (id, userId, shareToken, code, personName, phone, note, pickup, destination, status, createdAt, personOnline, location, path) =>
+    prisma.booking
+      .create({
+        data: {
+          id,
+          user_id: userId,
+          share_token: shareToken,
+          code,
+          person_name: personName,
+          phone,
+          note,
+          pickup,
+          destination,
+          status,
+          created_at: BIG(createdAt),
+          person_online: toBool(personOnline),
+          location,
+          path,
+        },
+      })
+      .then(bookingOut),
+  findBookingById: (id) => prisma.booking.findUnique({ where: { id } }).then(bookingOut),
+  findBookingByUser: (id, userId) =>
+    prisma.booking.findFirst({ where: { id, user_id: userId } }).then(bookingOut),
+  listBookingsByUserPage: (userId, limit, offset) =>
+    prisma.booking
+      .findMany({
+        where: { user_id: userId },
+        orderBy: { created_at: "desc" },
+        take: limit,
+        skip: offset,
+      })
+      .then((rows) => rows.map(bookingOut)),
+  updateBooking: (personName, phone, note, pickup, destination, status, personOnline, location, path, id) =>
+    prisma.booking.update({
+      where: { id },
+      data: {
+        person_name: personName,
+        phone,
+        note,
+        pickup,
+        destination,
+        status,
+        person_online: toBool(personOnline),
+        location,
+        path,
+      },
+    }),
+  clearAllOnline: () => prisma.booking.updateMany({ data: { person_online: false } }),
+
+  // ---- password resets ----
+  insertReset: (userId, tokenHash, createdAt, expiresAt) =>
+    prisma.passwordReset.create({
+      data: { user_id: userId, token_hash: tokenHash, created_at: BIG(createdAt), expires_at: BIG(expiresAt) },
+    }),
+  findReset: (tokenHash) => prisma.passwordReset.findUnique({ where: { token_hash: tokenHash } }),
+  deleteReset: (tokenHash) => prisma.passwordReset.deleteMany({ where: { token_hash: tokenHash } }),
+  deleteResetsForUser: (userId) => prisma.passwordReset.deleteMany({ where: { user_id: userId } }),
+
+  // ---- profiles ----
+  insertProfile: (userId, name, bio, skills, avatar, phone, city, listed, isActive, trackCode, codeExpiresAt, createdAt, updatedAt) =>
+    prisma.profile
+      .create({
+        data: {
+          user_id: userId,
+          name,
+          bio,
+          skills,
+          avatar,
+          phone,
+          city,
+          listed: toBool(listed),
+          is_active: toBool(isActive),
+          track_code: trackCode,
+          code_expires_at: BIG(codeExpiresAt),
+          created_at: BIG(createdAt),
+          updated_at: BIG(updatedAt),
+        },
+      })
+      .then(profileOut),
+  updateProfile: (name, bio, skills, avatar, phone, city, listed, isActive, updatedAt, id) =>
+    prisma.profile.update({
+      where: { id },
+      data: {
+        name,
+        bio,
+        skills,
+        avatar,
+        phone,
+        city,
+        listed: toBool(listed),
+        is_active: toBool(isActive),
+        updated_at: BIG(updatedAt),
+      },
+    }),
+  updateProfileCode: (trackCode, codeExpiresAt, id) =>
+    prisma.profile.update({
+      where: { id },
+      data: { track_code: trackCode, code_expires_at: BIG(codeExpiresAt) },
+    }),
+  findProfileById: (id) => prisma.profile.findUnique({ where: { id } }).then(profileOut),
+  findProfileByUser: (userId) => prisma.profile.findUnique({ where: { user_id: userId } }).then(profileOut),
+  findProfileByCode: (trackCode) =>
+    prisma.profile.findFirst({ where: { track_code: trackCode } }).then(profileOut),
+  listActiveProfilesPage: (userId, limit, offset) =>
+    prisma.profile
+      .findMany({
+        where: { is_active: true, listed: true, user_id: { not: userId } },
+        orderBy: { created_at: "desc" },
+        take: limit,
+        skip: offset,
+      })
+      .then((rows) => rows.map(profileOut)),
+  listExpiredCodes: (now) =>
+    prisma.profile.findMany({
+      where: { code_expires_at: { lt: BIG(now) } },
+      select: { id: true },
+    }),
 };
 
 export default stmts;

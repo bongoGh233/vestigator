@@ -71,66 +71,66 @@ export function publicUser(u) {
   return { id: u.id, name: u.name, email: u.email, createdAt: u.created_at };
 }
 
-export function createSession(userId, req) {
+export async function createSession(userId, req) {
   const token = crypto.randomBytes(32).toString("hex");
   const csrf = crypto.randomBytes(32).toString("hex");
   const now = Date.now();
-  stmts.insertSession.run(
-    sha256(token),
+  await stmts.insertSession({
+    tokenHash: sha256(token),
     userId,
     csrf,
-    now,
-    now + SESSION_TTL_MS,
-    req?.ip || "",
-    req?.headers?.["user-agent"] || ""
-  );
+    createdAt: now,
+    expiresAt: now + SESSION_TTL_MS,
+    ip: req?.ip || "",
+    userAgent: req?.headers?.["user-agent"] || "",
+  });
   return { token, csrf };
 }
 
-export function getSession(token) {
+export async function getSession(token) {
   if (!token) return null;
-  const s = stmts.findSession.get(sha256(token));
+  const s = await stmts.findSession(sha256(token));
   if (!s) return null;
   if (s.expires_at < Date.now()) {
-    stmts.deleteSession.run(s.token_hash);
+    await stmts.deleteSession(s.token_hash);
     return null;
   }
   return s;
 }
 
-export function destroySession(token) {
-  if (token) stmts.deleteSession.run(sha256(token));
+export async function destroySession(token) {
+  if (token) await stmts.deleteSession(sha256(token));
 }
 
 // ---------------- Password reset tokens ----------------
 
 export const RESET_TTL_MS = 30 * 60 * 1000;
 
-export function createPasswordReset(userId) {
+export async function createPasswordReset(userId) {
   const token = crypto.randomBytes(32).toString("hex");
   const now = Date.now();
-  stmts.deleteResetsForUser.run(userId);
-  stmts.insertReset.run(userId, sha256(token), now, now + RESET_TTL_MS);
+  await stmts.deleteResetsForUser(userId);
+  await stmts.insertReset(userId, sha256(token), now, now + RESET_TTL_MS);
   return token;
 }
 
-export function getPasswordReset(token) {
+export async function getPasswordReset(token) {
   if (!token) return null;
-  const row = stmts.findReset.get(sha256(token));
+  const row = await stmts.findReset(sha256(token));
   if (!row) return null;
   if (row.expires_at < Date.now()) {
-    stmts.deleteReset.run(row.token_hash);
+    await stmts.deleteReset(row.token_hash);
     return null;
   }
   return row;
 }
 
-export function deletePasswordReset(token) {
-  if (token) stmts.deleteReset.run(sha256(token));
+export async function deletePasswordReset(token) {
+  if (token) await stmts.deleteReset(sha256(token));
 }
 
-export function revokeAllSessions(userId) {
-  stmts.deleteAllSessions.run(userId);
+export async function revokeAllSessions(userId) {
+  await stmts.deleteAllSessions(userId);
 }
 
 export function setSessionCookie(res, token) {
@@ -165,13 +165,17 @@ export function parseCookies(header = "") {
   return out;
 }
 
-export function attachUser(req, _res, next) {
-  const cookies = parseCookies(req.headers.cookie);
-  const session = getSession(cookies[SESSION_COOKIE]);
-  if (session) {
-    req.userId = session.user_id;
-    req.session = session;
-    req.csrf = session.csrf;
+export async function attachUser(req, _res, next) {
+  try {
+    const cookies = parseCookies(req.headers.cookie);
+    const session = await getSession(cookies[SESSION_COOKIE]);
+    if (session) {
+      req.userId = session.user_id;
+      req.session = session;
+      req.csrf = session.csrf;
+    }
+  } catch (err) {
+    return next(err);
   }
   next();
 }
@@ -274,10 +278,8 @@ export function securityHeaders(req, res, next) {
 
 export function sessionCleanupLoop() {
   setInterval(() => {
-    try {
-      stmts.deleteExpiredSessions.run(Date.now());
-    } catch {
+    stmts.deleteExpiredSessions(Date.now()).catch(() => {
       /* ignore */
-    }
+    });
   }, 60 * 60 * 1000).unref();
 }

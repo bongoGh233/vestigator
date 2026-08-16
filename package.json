@@ -11,9 +11,13 @@
   },
   "scripts": {
     "dev": "concurrently -n server,client -c green,cyan \"npm run dev -w server\" \"npm run dev -w client\"",
-    "build": "npm run build -w client",
+    "build": "npm run prisma:generate && npm run build -w client",
     "start": "npm run start -w server",
-    "test": "node server/auth-test.mjs"
+    "test": "node server/auth-test.mjs",
+    "prisma:generate": "npx prisma generate",
+    "db:migrate": "npx prisma migrate dev",
+    "db:push": "npx prisma db push",
+    "db:studio": "npx prisma studio"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

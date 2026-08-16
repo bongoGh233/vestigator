@@ -33,6 +33,10 @@ npm run build      # production client build
 Dev servers: http://localhost:5174 (UI), API + socket proxied to
 http://localhost:4001.
 
+The server needs PostgreSQL. Copy `.env.example` to `.env` and set
+`DATABASE_URL` / `DIRECT_URL` (Supabase works out of the box), then
+`npm run db:migrate` once to create the schema.
+
 ## Single-server production
 
 ```bash
@@ -53,9 +57,10 @@ docker run -d -p 4001:4001 \
   -e NODE_ENV=production \
   -e APP_URL=https://vestigator.example.com \
   -e COOKIE_SECURE=1 \
+  -e DATABASE_URL=postgresql://... \
+  -e DIRECT_URL=postgresql://... \
   -e SMTP_HOST=... -e SMTP_PORT=587 -e SMTP_SECURE=0 \
   -e SMTP_USER=... -e SMTP_PASS=... -e MAIL_FROM=... \
-  -v vestigator-data:/app/server/data \
   vestigator
 ```
 
@@ -76,12 +81,9 @@ automatically:
 
 Notes:
 
-- Free tier has an **ephemeral filesystem** — the SQLite DB resets on
-  restart/redeploy, and the service spins down after ~15 min idle (wakes on
-  the next request). Upgrade to a paid instance and uncomment the `disk`
-  block in `render.yaml` for persistent data.
-- Set `SMTP_*` / `MAIL_FROM` under the service's **Environment** tab so
-  password-reset emails send for real (otherwise they're logged to console).
+- Set `DATABASE_URL` / `DIRECT_URL` (PostgreSQL, e.g. Supabase) and `SMTP_*` /
+  `MAIL_FROM` under the service's **Environment** tab so password-reset emails
+  send for real (otherwise they're logged to console).
 
 ## Configuration
 
@@ -94,7 +96,8 @@ See `.env.example` for the full list. Key variables:
 | `SERVE_STATIC` | — | `1` serves the built client over plain HTTP (local test) |
 | `APP_URL` | request host | Public base URL for links in emails |
 | `COOKIE_SECURE` | — | Force Secure cookies + HSTS |
-| `DATA_DIR` | `server/data` | Where the SQLite DB lives |
+| `DATABASE_URL` | — | PostgreSQL connection string (Prisma `url`) |
+| `DIRECT_URL` | — | Direct (non-pooled) PostgreSQL connection string |
 | `ARRIVE_THRESHOLD_M` | `80` | Distance that triggers auto-arrival |
 | `TRACK_CODE_TTL_MIN` | `10` | Profile track-code lifetime (minutes) |
 | `OSRM_SERVER` | `https://router.project-osrm.org` | Routing/ETA server |
@@ -102,7 +105,7 @@ See `.env.example` for the full list. Key variables:
 
 ## Notes
 
-- Location data is stored per booking in SQLite (`server/data/vestigator.db`).
+- Location data is stored per booking in PostgreSQL (via Prisma).
 - Map tiles: CARTO basemaps + OpenStreetMap; routing: OSRM. The Content
   Security Policy only allows those specific hosts.
 - The person's location is only shared while their page is open and they're

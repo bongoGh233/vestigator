@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { io } from "socket.io-client";
+import { prisma } from "./db.js";
 
 const TEST_PORT = Number(process.env.TEST_PORT) || 4199;
 const BASE = process.env.TEST_BASE || `http://localhost:${TEST_PORT}`;
+
+const TEST_EMAIL_SUFFIX = "@test.com";
 
 let ok = true;
 function check(label, cond, extra = "") {
@@ -344,15 +345,15 @@ async function main() {
   process.exitCode = ok ? 0 : 1;
 }
 
-// If no server is already listening, spawn one with a throwaway DB.
+// If no server is already listening, spawn one. The Postgres database it uses
+// is the one configured via DATABASE_URL/DIRECT_URL — the Prisma schema must
+// already be applied (npm run db:migrate).
 let server = null;
-let dataDir = null;
 if (!process.env.TEST_BASE) {
-  dataDir = mkdtempSync(path.join(tmpdir(), "vestigator-test-"));
   const serverDir = path.dirname(fileURLToPath(import.meta.url));
   server = spawn(process.execPath, ["index.js"], {
     cwd: serverDir,
-    env: { ...process.env, PORT: String(TEST_PORT), DATA_DIR: dataDir, ALLOWED_ORIGINS: BASE },
+    env: { ...process.env, PORT: String(TEST_PORT), ALLOWED_ORIGINS: BASE },
     stdio: "ignore",
   });
   let up = false;
@@ -385,10 +386,13 @@ try {
     server.kill();
     server = null;
     await new Promise((r) => setTimeout(r, 300));
-    try {
-      rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-    } catch {
-      /* best effort cleanup */
-    }
   }
+  // Remove users created during the run (bookings/sessions/resets/profiles
+  // cascade). Only touches test addresses.
+  try {
+    await prisma.user.deleteMany({ where: { email: { endsWith: TEST_EMAIL_SUFFIX } } });
+  } catch {
+    /* best effort cleanup */
+  }
+  await prisma.$disconnect();
 }

@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Server } from "socket.io";
-import stmts, { db } from "./db.js";
+import stmts from "./db.js";
 import {
   attachUser,
   requireAuth,
@@ -56,6 +56,13 @@ app.use((req, res, next) => {
 app.use(attachUser);
 app.use(originGuard);
 
+// Express 4 does not catch rejected promises from async handlers, so route
+// them through here and let the error middleware turn them into a 500 JSON
+// response instead of an unhandled rejection.
+const asyncHandler = (fn) => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: allowedOrigins(), credentials: true, methods: ["GET", "POST"] },
@@ -86,17 +93,17 @@ function fromProfileRow(row) {
   return { ...row, skills: JSON.parse(row.skills || "[]") };
 }
 
-function rotateCodeForProfile(p) {
+async function rotateCodeForProfile(p) {
   const code = generateCode();
   const expiresAt = Date.now() + TRACK_CODE_TTL_MS;
-  stmts.updateProfileCode.run(code, expiresAt, p.id);
+  await stmts.updateProfileCode(code, expiresAt, p.id);
   p.track_code = code;
   p.code_expires_at = expiresAt;
   return p;
 }
 
-function ensureFreshCode(p) {
-  if (p.code_expires_at <= Date.now()) rotateCodeForProfile(p);
+async function ensureFreshCode(p) {
+  if (p.code_expires_at <= Date.now()) await rotateCodeForProfile(p);
   return p;
 }
 
@@ -184,7 +191,7 @@ function makeCode() {
   return crypto.randomBytes(3).toString("hex").toUpperCase();
 }
 
-function createBooking(userId, data) {
+async function createBooking(userId, data) {
   const now = Date.now();
   const booking = {
     id: makeId(),
@@ -202,7 +209,7 @@ function createBooking(userId, data) {
     location: null,
     path: [],
   };
-  stmts.insertBooking.run(
+  await stmts.insertBooking(
     booking.id,
     booking.user_id,
     booking.share_token,
@@ -233,8 +240,8 @@ function fromRow(row) {
   };
 }
 
-function saveBooking(b) {
-  stmts.updateBooking.run(
+async function saveBooking(b) {
+  await stmts.updateBooking(
     b.person_name,
     b.phone,
     b.note,
@@ -339,17 +346,17 @@ app.get(
   }
 });
 
-app.get("/api/auth/me", (req, res) => {
+app.get("/api/auth/me", asyncHandler(async (req, res) => {
   if (!req.userId) return res.status(401).json({ error: "Authentication required." });
-  const user = stmts.findUserById.get(req.userId);
+  const user = await stmts.findUserById(req.userId);
   if (!user) return res.status(401).json({ error: "Authentication required." });
   res.json({ user: publicUser(user), csrf: req.session.csrf });
-});
+}));
 
 app.post(
   "/api/auth/register",
   rateLimit({ windowMs: 60 * 60 * 1000, max: 5, keyBy: (req) => `register:${req.ip}` }),
-  (req, res) => {
+  asyncHandler(async (req, res) => {
     const name = String(req.body?.name || "").trim().slice(0, 60);
     const email = normalizeEmail(req.body?.email);
     const password = req.body?.password;
@@ -359,25 +366,34 @@ app.post(
     if (!isValidPassword(password)) {
       return res.status(400).json({ error: "Password must be 10–128 characters." });
     }
-    if (stmts.findUserByEmail.get(email)) {
+    const existing = await stmts.findUserByEmail(email);
+    if (existing) {
       return res.status(409).json({ error: "An account with that email already exists." });
     }
 
-    const { lastInsertRowid } = stmts.insertUser.run(name, email, hashPassword(password), Date.now());
-    const user = stmts.findUserById.get(Number(lastInsertRowid));
-    const session = createSession(user.id, req);
+    let user;
+    try {
+      user = await stmts.insertUser(name, email, hashPassword(password), Date.now());
+    } catch (err) {
+      // Unique-email race: another request created the account in between.
+      if (err?.code === "P2002") {
+        return res.status(409).json({ error: "An account with that email already exists." });
+      }
+      throw err;
+    }
+    const session = await createSession(user.id, req);
     setSessionCookie(res, session.token);
     res.status(201).json({ user: publicUser(user), csrf: session.csrf });
-  }
+  })
 );
 
 app.post(
   "/api/auth/login",
   rateLimit({ windowMs: 15 * 60 * 1000, max: 5, keyBy: (req) => `login:${req.ip}:${normalizeEmail(req.body?.email)}` }),
-  (req, res) => {
+  asyncHandler(async (req, res) => {
     const email = normalizeEmail(req.body?.email);
     const password = req.body?.password;
-    const user = stmts.findUserByEmail.get(email);
+    const user = await stmts.findUserByEmail(email);
 
     if (user && user.locked_until && user.locked_until > Date.now()) {
       const retry = Math.ceil((user.locked_until - Date.now()) / 1000);
@@ -390,35 +406,35 @@ app.post(
       if (user) {
         const attempts = user.failed_attempts + 1;
         const lockedUntil = attempts >= 10 ? Date.now() + 15 * 60 * 1000 : null;
-        stmts.updateUserAttempts.run(attempts, lockedUntil, user.id);
+        await stmts.updateUserAttempts(attempts, lockedUntil, user.id);
       }
       return res.status(401).json({ error: "Invalid email or password." });
     }
 
-    stmts.updateUserAttempts.run(0, null, user.id);
-    const session = createSession(user.id, req);
+    await stmts.updateUserAttempts(0, null, user.id);
+    const session = await createSession(user.id, req);
     setSessionCookie(res, session.token);
     res.json({ user: publicUser(user), csrf: session.csrf });
-  }
+  })
 );
 
-app.post("/api/auth/logout", (req, res) => {
+app.post("/api/auth/logout", asyncHandler(async (req, res) => {
   const cookies = parseCookies(req.headers.cookie);
-  destroySession(cookies[SESSION_COOKIE]);
+  await destroySession(cookies[SESSION_COOKIE]);
   clearSessionCookie(res);
   res.json({ ok: true });
-});
+}));
 
 app.post(
   "/api/auth/reset/request",
   rateLimit({ windowMs: 60 * 60 * 1000, max: 3, keyBy: (req) => `reset:${req.ip}:${normalizeEmail(req.body?.email)}` }),
-  async (req, res) => {
+  asyncHandler(async (req, res) => {
     const email = normalizeEmail(req.body?.email);
-    const user = isValidEmail(email) ? stmts.findUserByEmail.get(email) : null;
+    const user = isValidEmail(email) ? await stmts.findUserByEmail(email) : null;
 
     let devLink = null;
     if (user) {
-      const token = createPasswordReset(user.id);
+      const token = await createPasswordReset(user.id);
       const origin = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
       const link = `${origin}/reset?token=${token}`;
       await sendEmail({
@@ -436,13 +452,13 @@ app.post(
       message: "If an account exists for that email, a reset link was sent.",
       ...(devLink ? { devLink } : {}),
     });
-  }
+  })
 );
 
 app.post(
   "/api/auth/reset/confirm",
   rateLimit({ windowMs: 15 * 60 * 1000, max: 5, keyBy: (req) => `resetconfirm:${req.ip}` }),
-  (req, res) => {
+  asyncHandler(async (req, res) => {
     const { token, password } = req.body || {};
     if (!token || typeof token !== "string") {
       return res.status(400).json({ error: "Invalid or expired reset link." });
@@ -450,32 +466,32 @@ app.post(
     if (!isValidPassword(password)) {
       return res.status(400).json({ error: "Password must be 10–128 characters." });
     }
-    const reset = getPasswordReset(token);
+    const reset = await getPasswordReset(token);
     if (!reset) {
       return res.status(400).json({ error: "Invalid or expired reset link." });
     }
-    const user = stmts.findUserById.get(reset.user_id);
+    const user = await stmts.findUserById(reset.user_id);
     if (!user) {
       return res.status(400).json({ error: "Invalid or expired reset link." });
     }
 
-    stmts.updateUserPassword.run(hashPassword(password), user.id);
-    deletePasswordReset(token);
-    revokeAllSessions(user.id);
+    await stmts.updateUserPassword(hashPassword(password), user.id);
+    await deletePasswordReset(token);
+    await revokeAllSessions(user.id);
 
-    const session = createSession(user.id, req);
+    const session = await createSession(user.id, req);
     setSessionCookie(res, session.token);
     res.json({ user: publicUser(user), csrf: session.csrf });
-  }
+  })
 );
 
-app.get("/api/bookings", requireAuth, (req, res) => {
+app.get("/api/bookings", requireAuth, asyncHandler(async (req, res) => {
   const { limit, offset } = pageParams(req);
-  const rows = stmts.listBookingsByUserPage.all(req.userId, limit, offset);
+  const rows = await stmts.listBookingsByUserPage(req.userId, limit, offset);
   res.json(rows.map((r) => toPublic(fromRow(r))));
-});
+}));
 
-app.post("/api/bookings", requireAuth, csrfGuard, (req, res) => {
+app.post("/api/bookings", requireAuth, csrfGuard, asyncHandler(async (req, res) => {
   const { personName, phone, note, pickup, destination } = req.body || {};
   if (!personName || typeof personName !== "string") {
     return res.status(400).json({ error: "Person's name is required." });
@@ -483,19 +499,19 @@ app.post("/api/bookings", requireAuth, csrfGuard, (req, res) => {
   if (!pickup || !destination || !pickup.lat || !destination.lat) {
     return res.status(400).json({ error: "Pickup and destination are required." });
   }
-  const booking = createBooking(req.userId, { personName, phone, note, pickup, destination });
+  const booking = await createBooking(req.userId, { personName, phone, note, pickup, destination });
   emitToOwner("booking:created", booking);
   res.status(201).json(toPublic(booking));
-});
+}));
 
-app.get("/api/bookings/:id", requireAuth, (req, res) => {
-  const b = fromRow(stmts.findBookingByUser.get(req.params.id, req.userId));
+app.get("/api/bookings/:id", requireAuth, asyncHandler(async (req, res) => {
+  const b = fromRow(await stmts.findBookingByUser(req.params.id, req.userId));
   if (!b) return res.status(404).json({ error: "Booking not found." });
   res.json(toPublic(b));
-});
+}));
 
-app.post("/api/bookings/:id/points", requireAuth, csrfGuard, (req, res) => {
-  const b = fromRow(stmts.findBookingByUser.get(req.params.id, req.userId));
+app.post("/api/bookings/:id/points", requireAuth, csrfGuard, asyncHandler(async (req, res) => {
+  const b = fromRow(await stmts.findBookingByUser(req.params.id, req.userId));
   if (!b) return res.status(404).json({ error: "Booking not found." });
   const { pickup, destination } = req.body || {};
   if (!pickup || !destination || !pickup.lat || !destination.lat) {
@@ -503,13 +519,13 @@ app.post("/api/bookings/:id/points", requireAuth, csrfGuard, (req, res) => {
   }
   b.pickup = pickup;
   b.destination = destination;
-  saveBooking(b);
+  await saveBooking(b);
   broadcast(b);
   res.json(toPublic(b));
-});
+}));
 
-app.get("/api/share/:id", (req, res) => {
-  const b = fromRow(stmts.findBookingById.get(req.params.id));
+app.get("/api/share/:id", asyncHandler(async (req, res) => {
+  const b = fromRow(await stmts.findBookingById(req.params.id));
   if (!b || b.share_token !== (req.query.t || "")) {
     return res.status(404).json({ error: "Tracking link is invalid or expired." });
   }
@@ -520,106 +536,107 @@ app.get("/api/share/:id", (req, res) => {
     destination: b.destination,
     status: b.status,
   });
-});
+}));
 
 // ---------------- Trackable profiles ----------------
 
-app.get("/api/profiles", requireAuth, (req, res) => {
+app.get("/api/profiles", requireAuth, asyncHandler(async (req, res) => {
   const { limit, offset } = pageParams(req);
-  const rows = stmts.listActiveProfilesPage.all(req.userId, limit, offset);
+  const rows = await stmts.listActiveProfilesPage(req.userId, limit, offset);
   const list = rows.map((r) => publicProfile(fromProfileRow(r)));
-  const own = fromProfileRow(stmts.findProfileByUser.get(req.userId));
+  const own = fromProfileRow(await stmts.findProfileByUser(req.userId));
   if (own && own.is_active && own.listed) {
     list.unshift({ ...publicProfile(own), isOwn: true });
   }
   res.json(list);
-});
+}));
 
-app.get("/api/profiles/:id", requireAuth, (req, res) => {
-  const p = fromProfileRow(stmts.findProfileById.get(Number(req.params.id)));
+app.get("/api/profiles/:id", requireAuth, asyncHandler(async (req, res) => {
+  const p = fromProfileRow(await stmts.findProfileById(Number(req.params.id)));
   if (!p || !p.is_active) return res.status(404).json({ error: "Profile not found." });
   res.json(publicProfile(p));
-});
+}));
 
 app.post(
   "/api/track-by-code",
   requireAuth,
   rateLimit({ windowMs: 10 * 60 * 1000, max: 20, keyBy: (req) => `bycode:${req.ip}` }),
-  (req, res) => {
+  asyncHandler(async (req, res) => {
     const code = String(req.body?.code || "").trim().toUpperCase().replace(/[\s-]/g, "");
     if (!code) return res.status(400).json({ error: "Enter a tracking code." });
-    const p = fromProfileRow(stmts.findProfileByCode.get(code));
+    const p = fromProfileRow(await stmts.findProfileByCode(code));
     if (!p || !p.is_active) {
       return res.status(404).json({ error: "No active person found with that code." });
     }
-    rotateCodeForProfile(p); // codes are single-use: rotate once used
-    const booking = createBooking(req.userId, {
+    await rotateCodeForProfile(p); // codes are single-use: rotate once used
+    const booking = await createBooking(req.userId, {
       personName: p.name,
       phone: p.phone,
       note: `Tracked via profile${p.city ? ` — ${p.city}` : ""}`,
     });
     emitToOwner("booking:created", booking);
     res.status(201).json(toPublic(booking));
-  }
+  })
 );
 
-app.get("/api/profile", requireAuth, (req, res) => {
-  const p = fromProfileRow(stmts.findProfileByUser.get(req.userId));
+app.get("/api/profile", requireAuth, asyncHandler(async (req, res) => {
+  const p = fromProfileRow(await stmts.findProfileByUser(req.userId));
   if (!p) return res.status(404).json({ error: "No profile yet." });
-  ensureFreshCode(p);
+  await ensureFreshCode(p);
   res.json(ownProfile(p));
-});
+}));
 
-app.post("/api/profile", requireAuth, csrfGuard, (req, res) => {
+app.post("/api/profile", requireAuth, csrfGuard, asyncHandler(async (req, res) => {
   const clean = sanitizeProfileInput(req.body);
   if (clean.error) return res.status(400).json({ error: clean.error });
   const v = clean.value;
-  const existing = fromProfileRow(stmts.findProfileByUser.get(req.userId));
+  const existing = fromProfileRow(await stmts.findProfileByUser(req.userId));
   const now = Date.now();
 
   let p;
   if (existing) {
-    stmts.updateProfile.run(v.name, v.bio, JSON.stringify(v.skills), v.avatar, v.phone, v.city, v.listed ? 1 : 0, 1, now, existing.id);
-    p = fromProfileRow(stmts.findProfileById.get(existing.id));
+    await stmts.updateProfile(v.name, v.bio, JSON.stringify(v.skills), v.avatar, v.phone, v.city, v.listed ? 1 : 0, 1, now, existing.id);
+    p = fromProfileRow(await stmts.findProfileById(existing.id));
   } else {
     const code = generateCode();
-    const { lastInsertRowid } = stmts.insertProfile.run(
-      req.userId,
-      v.name,
-      v.bio,
-      JSON.stringify(v.skills),
-      v.avatar,
-      v.phone,
-      v.city,
-      v.listed ? 1 : 0,
-      1,
-      code,
-      now + TRACK_CODE_TTL_MS,
-      now,
-      now
+    p = fromProfileRow(
+      await stmts.insertProfile(
+        req.userId,
+        v.name,
+        v.bio,
+        JSON.stringify(v.skills),
+        v.avatar,
+        v.phone,
+        v.city,
+        v.listed ? 1 : 0,
+        1,
+        code,
+        now + TRACK_CODE_TTL_MS,
+        now,
+        now
+      )
     );
-    p = fromProfileRow(stmts.findProfileById.get(Number(lastInsertRowid)));
   }
   res.status(201).json(ownProfile(p));
-});
+}));
 
-app.post("/api/profile/rotate-code", requireAuth, csrfGuard, (req, res) => {
-  const p = fromProfileRow(stmts.findProfileByUser.get(req.userId));
+app.post("/api/profile/rotate-code", requireAuth, csrfGuard, asyncHandler(async (req, res) => {
+  const p = fromProfileRow(await stmts.findProfileByUser(req.userId));
   if (!p) return res.status(404).json({ error: "No profile yet." });
-  rotateCodeForProfile(p);
+  await rotateCodeForProfile(p);
   res.json({ trackCode: p.track_code, codeExpiresAt: p.code_expires_at });
-});
+}));
 
 app.post("/api/profiles/:id/track", requireAuth, csrfGuard,
   rateLimit({ windowMs: 60 * 60 * 1000, max: 30, keyBy: (req) => `track:${req.userId}` }),
-  (req, res) => {
-    const p = fromProfileRow(stmts.findProfileById.get(Number(req.params.id)));
+  asyncHandler(async (req, res) => {
+    const p = fromProfileRow(await stmts.findProfileById(Number(req.params.id)));
     if (!p || !p.is_active) return res.status(404).json({ error: "Profile not found." });
     const { pickup, destination } = req.body || {};
     if (!pickup || !destination || !pickup.lat || !destination.lat) {
       return res.status(400).json({ error: "Pickup and destination are required." });
     }
-    const booking = createBooking(req.userId, {
+    const booking = await createBooking(req.userId, {
       personName: p.name,
       phone: p.phone,
       note: `Tracked via profile${p.city ? ` — ${p.city}` : ""}`,
@@ -628,14 +645,14 @@ app.post("/api/profiles/:id/track", requireAuth, csrfGuard,
     });
     emitToOwner("booking:created", booking);
     res.status(201).json(toPublic(booking));
-  }
+  })
 );
 
 // ---------------- Socket ----------------
 
-function sessionFromSocket(socket) {
+async function sessionFromSocket(socket) {
   const cookies = parseCookies(socket.handshake.headers.cookie || "");
-  return getSession(cookies[SESSION_COOKIE]);
+  return await getSession(cookies[SESSION_COOKIE]);
 }
 
 io.use((socket, next) => {
@@ -643,9 +660,12 @@ io.use((socket, next) => {
   if (origin && !allowedOrigins().includes(origin)) {
     return next(new Error("origin not allowed"));
   }
-  const session = sessionFromSocket(socket);
-  if (session) socket.userId = session.user_id;
-  next();
+  sessionFromSocket(socket)
+    .then((session) => {
+      if (session) socket.userId = session.user_id;
+      next();
+    })
+    .catch(next);
 });
 
 io.on("connection", (socket) => {
@@ -653,60 +673,77 @@ io.on("connection", (socket) => {
     socket.join(`user:${socket.userId}`);
   }
 
-  socket.on("booking:create", (data, cb) => {
+  socket.on("booking:create", async (data, cb) => {
     if (!socket.userId) return typeof cb === "function" && cb({ error: "Authentication required." });
     const { personName, phone, note, pickup, destination } = data || {};
     if (!personName || typeof personName !== "string" || !pickup || !destination) {
       return typeof cb === "function" && cb({ error: "Missing booking details." });
     }
-    const booking = createBooking(socket.userId, { personName, phone, note, pickup, destination });
-    emitToOwner("booking:created", booking);
-    if (typeof cb === "function") cb(toPublic(booking));
+    try {
+      const booking = await createBooking(socket.userId, { personName, phone, note, pickup, destination });
+      emitToOwner("booking:created", booking);
+      if (typeof cb === "function") cb(toPublic(booking));
+    } catch (err) {
+      console.error("booking:create failed:", err);
+      if (typeof cb === "function") cb({ error: "Could not create booking." });
+    }
   });
 
-  socket.on("watch:join", ({ bookingId }) => {
+  socket.on("watch:join", async ({ bookingId }) => {
     if (!socket.userId) return;
-    const b = fromRow(stmts.findBookingByUser.get(bookingId, socket.userId));
-    if (!b) return;
-    socket.join(`watch:${bookingId}`);
-    socket.emit("booking:update", toPublic(b));
+    try {
+      const b = fromRow(await stmts.findBookingByUser(bookingId, socket.userId));
+      if (!b) return;
+      socket.join(`watch:${bookingId}`);
+      socket.emit("booking:update", toPublic(b));
+    } catch (err) {
+      console.error("watch:join failed:", err);
+    }
   });
 
   socket.on("watch:leave", ({ bookingId }) => {
     socket.leave(`watch:${bookingId}`);
   });
 
-  socket.on("booking:cancel", ({ bookingId }) => {
+  socket.on("booking:cancel", async ({ bookingId }) => {
     if (!socket.userId) return;
-    const b = fromRow(stmts.findBookingByUser.get(bookingId, socket.userId));
-    if (!b) return;
-    b.status = "cancelled";
-    saveBooking(b);
-    io.to(`watch:${bookingId}`).emit("booking:cancelled", toPublic(b));
-    broadcast(b);
+    try {
+      const b = fromRow(await stmts.findBookingByUser(bookingId, socket.userId));
+      if (!b) return;
+      b.status = "cancelled";
+      await saveBooking(b);
+      io.to(`watch:${bookingId}`).emit("booking:cancelled", toPublic(b));
+      broadcast(b);
+    } catch (err) {
+      console.error("booking:cancel failed:", err);
+    }
   });
 
   // Owner confirms the person has arrived (additive — the person can still
   // self-report via arrival:update, and auto-arrival still fires on distance).
-  socket.on("booking:arrived", ({ bookingId }) => {
+  socket.on("booking:arrived", async ({ bookingId }) => {
     if (!socket.userId) return;
-    const b = fromRow(stmts.findBookingByUser.get(bookingId, socket.userId));
-    if (!b) return;
-    b.status = "arrived";
-    saveBooking(b);
-    const pub = toPublic(b);
-    const personSet = personSockets.get(bookingId);
-    if (personSet) {
-      for (const sid of personSet) io.to(sid).emit("person:arrived", pub);
+    try {
+      const b = fromRow(await stmts.findBookingByUser(bookingId, socket.userId));
+      if (!b) return;
+      b.status = "arrived";
+      await saveBooking(b);
+      const pub = toPublic(b);
+      const personSet = personSockets.get(bookingId);
+      if (personSet) {
+        for (const sid of personSet) io.to(sid).emit("person:arrived", pub);
+      }
+      broadcast(b);
+    } catch (err) {
+      console.error("booking:arrived failed:", err);
     }
-    broadcast(b);
   });
 
   // ---- The tracked person (anonymous, authenticated by share token) ----
 
-  function authorizeToken(bookingId, token) {
+  async function authorizeToken(bookingId, token) {
     if (!bookingId || !token) return null;
-    const b = fromRow(stmts.findBookingById.get(bookingId));
+    const b = fromRow(await stmts.findBookingById(bookingId));
     if (!b) return null;
     const a = Buffer.from(b.share_token);
     const c = Buffer.from(String(token));
@@ -714,93 +751,117 @@ io.on("connection", (socket) => {
     return b;
   }
 
-  function markPersonOffline(bookingId) {
+  async function markPersonOffline(bookingId) {
     const set = personSockets.get(bookingId);
     if (!set) return;
     set.delete(socket.id);
     if (set.size === 0) {
       personSockets.delete(bookingId);
-      const b = fromRow(stmts.findBookingById.get(bookingId));
-      if (b && b.person_online) {
-        b.person_online = 0;
-        saveBooking(b);
-        broadcast(b);
+      try {
+        const b = fromRow(await stmts.findBookingById(bookingId));
+        if (b && b.person_online) {
+          b.person_online = 0;
+          await saveBooking(b);
+          broadcast(b);
+        }
+      } catch (err) {
+        console.error("markPersonOffline failed:", err);
       }
     }
   }
 
-  socket.on("person:join", ({ bookingId, token, personName }, cb) => {
-    const b = authorizeToken(bookingId, token);
-    if (!b) {
-      return typeof cb === "function" && cb({ error: "Invalid tracking link." });
+  socket.on("person:join", async ({ bookingId, token, personName }, cb) => {
+    try {
+      const b = await authorizeToken(bookingId, token);
+      if (!b) {
+        return typeof cb === "function" && cb({ error: "Invalid tracking link." });
+      }
+      if (b.status === "arrived" || b.status === "cancelled") {
+        return typeof cb === "function" && cb({ error: "This tracking session has ended." });
+      }
+      socket.vestBookingId = bookingId;
+      if (!personSockets.has(bookingId)) personSockets.set(bookingId, new Set());
+      personSockets.get(bookingId).add(socket.id);
+      b.person_online = 1;
+      if (personName && String(personName).trim()) b.person_name = String(personName).trim();
+      if (b.status === "pending") b.status = "online";
+      await saveBooking(b);
+      broadcast(b);
+      if (typeof cb === "function") cb({ ok: true });
+    } catch (err) {
+      console.error("person:join failed:", err);
+      if (typeof cb === "function") cb({ error: "Could not join tracking session." });
     }
-    if (b.status === "arrived" || b.status === "cancelled") {
-      return typeof cb === "function" && cb({ error: "This tracking session has ended." });
-    }
-    socket.vestBookingId = bookingId;
-    if (!personSockets.has(bookingId)) personSockets.set(bookingId, new Set());
-    personSockets.get(bookingId).add(socket.id);
-    b.person_online = 1;
-    if (personName && String(personName).trim()) b.person_name = String(personName).trim();
-    if (b.status === "pending") b.status = "online";
-    saveBooking(b);
-    broadcast(b);
-    if (typeof cb === "function") cb({ ok: true });
   });
 
-  socket.on("person:leave", ({ bookingId }) => {
+  socket.on("person:leave", async ({ bookingId }) => {
     if (bookingId === socket.vestBookingId) {
       socket.vestBookingId = null;
-      markPersonOffline(bookingId);
+      await markPersonOffline(bookingId);
     }
   });
 
-  socket.on("location:update", ({ bookingId, token, lat, lng, accuracy, speed }) => {
-    const b = authorizeToken(bookingId, token);
-    if (!b || typeof lat !== "number" || typeof lng !== "number") return;
-    const point = { lat, lng, accuracy: accuracy || 10, speed: speed || 0, t: Date.now() };
-    b.path = [...b.path, point];
-    if (b.path.length > MAX_PATH) b.path = b.path.slice(-MAX_PATH);
-    b.person_online = 1;
+  socket.on("location:update", async ({ bookingId, token, lat, lng, accuracy, speed }) => {
+    try {
+      const b = await authorizeToken(bookingId, token);
+      if (!b || typeof lat !== "number" || typeof lng !== "number") return;
+      const point = { lat, lng, accuracy: accuracy || 10, speed: speed || 0, t: Date.now() };
+      b.path = [...b.path, point];
+      if (b.path.length > MAX_PATH) b.path = b.path.slice(-MAX_PATH);
+      b.person_online = 1;
 
-    if (
-      b.status !== "arrived" &&
-      b.status !== "cancelled" &&
-      b.destination &&
-      haversine(point, b.destination) <= ARRIVE_THRESHOLD_M
-    ) {
-      b.status = "arrived";
+      if (
+        b.status !== "arrived" &&
+        b.status !== "cancelled" &&
+        b.destination &&
+        haversine(point, b.destination) <= ARRIVE_THRESHOLD_M
+      ) {
+        b.status = "arrived";
+        b.location = point;
+        await saveBooking(b);
+        socket.emit("person:arrived", toPublic(b));
+        broadcast(b);
+        return;
+      }
+
+      if (b.status !== "arrived" && b.status !== "cancelled") {
+        b.status = "in_transit";
+      }
       b.location = point;
-      saveBooking(b);
+      await saveBooking(b);
+      broadcast(b);
+    } catch (err) {
+      console.error("location:update failed:", err);
+    }
+  });
+
+  socket.on("arrival:update", async ({ bookingId, token }) => {
+    try {
+      const b = await authorizeToken(bookingId, token);
+      if (!b) return;
+      b.status = "arrived";
+      await saveBooking(b);
       socket.emit("person:arrived", toPublic(b));
       broadcast(b);
-      return;
+    } catch (err) {
+      console.error("arrival:update failed:", err);
     }
-
-    if (b.status !== "arrived" && b.status !== "cancelled") {
-      b.status = "in_transit";
-    }
-    b.location = point;
-    saveBooking(b);
-    broadcast(b);
   });
 
-  socket.on("arrival:update", ({ bookingId, token }) => {
-    const b = authorizeToken(bookingId, token);
-    if (!b) return;
-    b.status = "arrived";
-    saveBooking(b);
-    socket.emit("person:arrived", toPublic(b));
-    broadcast(b);
-  });
-
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     if (socket.vestBookingId) {
       const bookingId = socket.vestBookingId;
       socket.vestBookingId = null;
-      markPersonOffline(bookingId);
+      await markPersonOffline(bookingId);
     }
   });
+});
+
+// Any error that escapes a route handler (e.g. a database failure) becomes a
+// clean 500 JSON response instead of an unhandled rejection.
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error." });
 });
 
 sessionCleanupLoop();
@@ -809,11 +870,17 @@ initMailer();
 // Rotate expired tracking codes even when nobody is looking, so old
 // codes stop working.
 setInterval(() => {
-  const now = Date.now();
-  for (const row of stmts.listExpiredCodes.all(now)) {
-    const p = fromProfileRow(stmts.findProfileById.get(row.id));
-    if (p) rotateCodeForProfile(p);
-  }
+  stmts
+    .listExpiredCodes(Date.now())
+    .then((rows) =>
+      Promise.all(
+        rows.map(async (row) => {
+          const p = fromProfileRow(await stmts.findProfileById(row.id));
+          if (p) await rotateCodeForProfile(p);
+        })
+      )
+    )
+    .catch((err) => console.error("code rotation failed:", err));
 }, 60_000).unref();
 
 // In production the built client is served from the same server, so the
@@ -834,7 +901,13 @@ if (SERVE_STATIC && fs.existsSync(CLIENT_DIST)) {
 
 // Any "online" flag persisted before this process started refers to sockets
 // that no longer exist, so clear them at boot (startup reset for restarts).
-stmts.clearAllOnline.run();
+try {
+  await stmts.ping();
+  await stmts.clearAllOnline();
+} catch (err) {
+  console.error("Database connection failed:", err.message);
+  process.exit(1);
+}
 
 server.listen(PORT, () => {
   console.log(

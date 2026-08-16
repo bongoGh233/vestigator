@@ -5,10 +5,10 @@
 #  2. On Render: New > Blueprint  ->  connect your repo. Everything below
 #     is applied automatically and you get a free https://vestigator.onrender.com.
 #
-# The free tier uses an ephemeral filesystem, so the SQLite DB is lost on
-# restart/redeploy (DATA_DIR points at a writable /tmp dir below). To keep
-# data across deploys, switch plan to starter, uncomment the disk block, and
-# set DATA_DIR back to /var/data.
+# The database is PostgreSQL hosted on Supabase. Persistence lives in Supabase,
+# not on the Render filesystem. Set DATABASE_URL and DIRECT_URL in the Render
+# dashboard (Environment tab) using the Supabase connection strings — they are
+# required for the build (prisma generate) and for the running server.
 services:
   - type: web
     name: vestigator
@@ -28,18 +28,19 @@ services:
         value: production
       - key: APP_URL
         value: https://vestigator.onrender.com
-      # /var/data is not writable without a mounted disk (free tier), which
-      # crashed the app with "EACCES: permission denied, mkdir '/var/data'".
-      # /tmp is always writable. Change back to /var/data if you enable the
-      # disk block below.
-      - key: DATA_DIR
-        value: /tmp/vestigator-data
       - key: ARRIVE_THRESHOLD_M
         value: "80"
       - key: TRACK_CODE_TTL_MIN
         value: "10"
       - key: OSRM_SERVER
         value: https://router.project-osrm.org
+      # Set these in the Render dashboard after deploy (Environment tab):
+      # DATABASE_URL  — Supabase pooled connection string (server runtime)
+      # DIRECT_URL    — Supabase direct connection string (Prisma migrations)
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
       # Set these in the Render dashboard after deploy (Environment tab):
       - key: SMTP_HOST
         sync: false
@@ -53,9 +54,3 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
-    # Persistent disk — requires a paid (starter+) instance. When enabled,
-    # also set DATA_DIR (above) back to /var/data:
-    # disk:
-    #   name: vestigator-data
-    #   mountPath: /var/data
-    #   sizeGB: 1

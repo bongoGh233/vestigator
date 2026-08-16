@@ -1,0 +1,105 @@
+// Vestigator data model — PostgreSQL (Supabase).
+//
+// This schema is a faithful port of the previous SQLite schema that lived in
+// server/db.js (tables: users, sessions, bookings, password_resets, profiles).
+// Column names are preserved; timestamps stay as millisecond BIGINTs so the
+// application API is unchanged. JSON-ish fields (pickup, destination, location,
+// path, skills) remain TEXT and are parsed in server/index.js exactly as before.
+//
+// DATABASE_URL:  pooled connection string for the running server (transaction
+//                pooler, port 6543, ?pgbouncer=true).
+// DIRECT_URL:    direct connection string (port 5432) used by Prisma migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id              Int             @id @default(autoincrement())
+  name            String
+  email           String          @unique
+  password_hash   String
+  created_at      BigInt
+  failed_attempts Int             @default(0)
+  locked_until    BigInt?
+  sessions        Session[]
+  bookings        Booking[]
+  passwordResets  PasswordReset[]
+  profiles        Profile[]
+
+  @@map("users")
+}
+
+model Session {
+  token_hash String   @id
+  user_id    Int
+  csrf       String
+  created_at BigInt
+  expires_at BigInt
+  ip         String?
+  user_agent String?
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("sessions")
+}
+
+model Booking {
+  id            String  @id
+  user_id       Int
+  share_token   String
+  code          String
+  person_name   String
+  phone         String  @default("")
+  note          String  @default("")
+  pickup        String?
+  destination   String?
+  status        String  @default("pending")
+  created_at    BigInt
+  person_online Boolean @default(false)
+  location      String?
+  path          String  @default("[]")
+  user          User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("bookings")
+}
+
+model PasswordReset {
+  id         Int    @id @default(autoincrement())
+  user_id    Int
+  token_hash String @unique
+  created_at BigInt
+  expires_at BigInt
+  user       User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("password_resets")
+}
+
+model Profile {
+  id              Int     @id @default(autoincrement())
+  user_id         Int     @unique
+  name            String
+  bio             String  @default("")
+  skills          String  @default("[]")
+  avatar          String?
+  phone           String  @default("")
+  city            String  @default("")
+  listed          Boolean @default(true)
+  is_active       Boolean @default(true)
+  track_code      String
+  code_expires_at BigInt
+  created_at      BigInt
+  updated_at      BigInt
+  user            User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([track_code])
+  @@map("profiles")
+}
