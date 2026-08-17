@@ -27,7 +27,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: APP_URL
-        value: https://vestigator.onrender.com
+        value: https://bookking.onrender.com
       - key: ARRIVE_THRESHOLD_M
         value: "80"
       - key: TRACK_CODE_TTL_MIN

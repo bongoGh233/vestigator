@@ -226,7 +226,12 @@ export function originGuard(req, res, next) {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
   const origin = req.get("Origin");
   if (!origin) return next();
-  if (!allowedOrigins().includes(origin)) {
+  const origins = allowedOrigins();
+  if (process.env.NODE_ENV === "production") {
+    const host = req.get("Host");
+    if (host) origins.push(`https://${host}`);
+  }
+  if (!origins.includes(origin)) {
     return res.status(403).json({ error: "Cross-origin request blocked." });
   }
   next();
