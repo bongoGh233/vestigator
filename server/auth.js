@@ -236,7 +236,7 @@ export function allowedOrigins() {
   if (process.env.ALLOWED_ORIGINS) {
     return process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
   }
-  return [
+  const origins = [
     "http://localhost:4001",
     "http://localhost:5173",
     "http://localhost:5174",
@@ -244,6 +244,8 @@ export function allowedOrigins() {
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
   ];
+  if (process.env.APP_URL) origins.push(process.env.APP_URL);
+  return origins;
 }
 
 // ---------------- Rate limiting ----------------
