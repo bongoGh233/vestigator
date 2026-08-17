@@ -27,7 +27,7 @@ export default function Forgot() {
   return (
     <div className="container">
       <div className="join-hero" style={{ maxWidth: 400 }}>
-        <span className="hero-badge">Vestigator · password reset</span>
+        <span className="hero-badge">Bookking · password reset</span>
         <h1 style={{ margin: 0 }}>Forgot your password?</h1>
         <p className="sub">Enter your email and we'll send you a reset link. It expires in 30 minutes.</p>
 

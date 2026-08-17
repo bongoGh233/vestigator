@@ -68,7 +68,18 @@ export function isValidPassword(password) {
 }
 
 export function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email, createdAt: u.created_at };
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    createdAt: u.created_at,
+    // Marketplace role ("customer" | "provider" | "both" | "admin"), needed by
+    // the client for role-aware navigation. The server still enforces every
+    // role check on each request — this is display metadata only.
+    role: u.role || "customer",
+    // Account status ("active" | "suspended"). Suspended accounts cannot log in.
+    status: u.status || "active",
+  };
 }
 
 export async function createSession(userId, req) {
@@ -187,6 +198,17 @@ export function requireAuth(req, res, next) {
   next();
 }
 
+export async function requireAdmin(req, res, next) {
+  if (!req.userId) {
+    return res.status(401).json({ error: "Authentication required." });
+  }
+  const user = await stmts.findUserById(req.userId);
+  if (!user || user.role !== "admin") {
+    return res.status(403).json({ error: "Admin access required." });
+  }
+  next();
+}
+
 const safeEqual = (a, b) => {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -215,8 +237,10 @@ export function allowedOrigins() {
     return process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
   }
   return [
+    "http://localhost:4001",
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://127.0.0.1:4001",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
   ];

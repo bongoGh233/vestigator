@@ -38,7 +38,7 @@ export default function Register() {
   return (
     <div className="container">
       <div className="join-hero" style={{ maxWidth: 400 }}>
-        <span className="hero-badge">Vestigator · create account</span>
+        <span className="hero-badge">Bookking · create account</span>
         <h1 style={{ margin: 0 }}>Create your account</h1>
         <p className="sub">Your bookings and tracking data stay private to you.</p>
 

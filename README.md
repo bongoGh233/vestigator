@@ -1,4 +1,4 @@
-# Vestigator
+# Bookking
 
 Track the people you care about. Create a tracking link, send it to someone,
 and watch them arrive live on a map — with ETA, driving route, auto-arrival
@@ -52,16 +52,16 @@ local smoke test over plain HTTP, run with `SERVE_STATIC=1` instead of
 ### Docker
 
 ```bash
-docker build -t vestigator .
+docker build -t bookking .
 docker run -d -p 4001:4001 \
   -e NODE_ENV=production \
-  -e APP_URL=https://vestigator.example.com \
+  -e APP_URL=https://bookking.example.com \
   -e COOKIE_SECURE=1 \
   -e DATABASE_URL=postgresql://... \
   -e DIRECT_URL=postgresql://... \
   -e SMTP_HOST=... -e SMTP_PORT=587 -e SMTP_SECURE=0 \
   -e SMTP_USER=... -e SMTP_PASS=... -e MAIL_FROM=... \
-  vestigator
+  bookking
 ```
 
 Put it behind HTTPS (Caddy / nginx / a load balancer); `COOKIE_SECURE=1` and
@@ -76,7 +76,7 @@ automatically:
 2. On Render: **New > Blueprint** → connect that repo.
 3. It builds (`npm ci && npm run build`) and starts `node server/index.js`
    with `NODE_ENV=production`, serving the whole app over HTTPS at
-   `https://vestigator.onrender.com` (free subdomain; add a custom domain
+    `https://bookking.onrender.com` (free subdomain; add a custom domain
    later in **Settings > Domains**).
 
 Notes:

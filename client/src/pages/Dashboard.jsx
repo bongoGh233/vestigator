@@ -27,8 +27,17 @@ export default function Dashboard() {
     };
   }, []);
 
-  const active = bookings.filter((b) => !["cancelled", "arrived"].includes(b.status));
-  const done = bookings.filter((b) => ["cancelled", "arrived"].includes(b.status));
+  const LEGACY_ACTIVE = ["pending", "online", "in_transit"];
+  const LEGACY_DONE = ["arrived", "cancelled"];
+  const MKT_ACTIVE = ["REQUESTED", "ACCEPTED", "PROVIDER_EN_ROUTE", "ARRIVED", "IN_PROGRESS"];
+  const MKT_DONE = ["COMPLETED", "REJECTED", "EXPIRED", "CANCELLED"];
+
+  const active = bookings.filter((b) =>
+    b.profileId ? MKT_ACTIVE.includes(b.status) : LEGACY_ACTIVE.includes(b.status)
+  );
+  const done = bookings.filter((b) =>
+    b.profileId ? MKT_DONE.includes(b.status) : LEGACY_DONE.includes(b.status)
+  );
 
   return (
     <div className="container">
@@ -57,10 +66,10 @@ export default function Dashboard() {
               </div>
             )}
             {active.map((b) => (
-          <Link key={b.id} to={`/track/${b.id}`} className="booking-item">
-            <div className="avatar">{initials(b.personName)}</div>
+          <Link key={b.id} to={b.profileId ? `/requests/${b.id}` : `/track/${b.id}`} className="booking-item">
+            <div className="avatar">{initials(b.service?.title || b.personName)}</div>
             <div className="meta">
-              <div className="name">{b.personName}</div>
+              <div className="name">{b.service?.title || b.personName}</div>
               <div className="route">
                 {b.pickup ? `${b.pickup.lat.toFixed(4)}, ${b.pickup.lng.toFixed(4)}` : "—"}
                 {"  →  "}
@@ -78,10 +87,10 @@ export default function Dashboard() {
           <h3 style={{ margin: "26px 0 10px" }}>Completed</h3>
           <div className="booking-list">
             {done.map((b) => (
-              <Link key={b.id} to={`/track/${b.id}`} className="booking-item" style={{ opacity: 0.6 }}>
-                <div className="avatar">{initials(b.personName)}</div>
+              <Link key={b.id} to={b.profileId ? `/requests/${b.id}` : `/track/${b.id}`} className="booking-item" style={{ opacity: 0.6 }}>
+                <div className="avatar">{initials(b.service?.title || b.personName)}</div>
                 <div className="meta">
-                  <div className="name">{b.personName}</div>
+                  <div className="name">{b.service?.title || b.personName}</div>
                   <div className="route">
                     {b.pickup ? `${b.pickup.lat.toFixed(4)}, ${b.pickup.lng.toFixed(4)}` : "—"}
                     {"  →  "}

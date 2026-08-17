@@ -250,7 +250,7 @@ async function main() {
   const ownInDir = r.data.find((p) => p.name === "Ada Lovelace");
   check("own profile appears in directory", !!ownInDir);
   check("own profile is flagged isOwn", !!ownInDir?.isOwn);
-  check("others are not flagged isOwn", r.data.every((p) => p.isOwn === !!p.isOwn));
+  check("others are not flagged isOwn", r.data.every((p) => (p.name === "Ada Lovelace" ? p.isOwn === true : !p.isOwn)));
 
   // Unlisting removes the profile from the directory
   r = await request("/api/profile", {

@@ -25,7 +25,7 @@ export async function sendEmail({ to, subject, text }) {
     return;
   }
   await transporter.sendMail({
-    from: process.env.MAIL_FROM || "Vestigator <no-reply@vestigator.local>",
+    from: process.env.MAIL_FROM || "Bookking <no-reply@bookking.local>",
     to,
     subject,
     text,

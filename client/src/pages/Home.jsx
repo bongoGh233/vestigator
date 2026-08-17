@@ -116,6 +116,12 @@ export default function Home() {
         tracking code to follow them live on the map.
       </p>
 
+      <div className="notice" style={{ marginBottom: 18 }}>
+        <b>Need a service instead?</b> Airports, errands, delivery and more from
+        local providers.{" "}
+        <Link to="/explore">Explore services →</Link>
+      </div>
+
       {loaded && !own && (
         <div className="notice" style={{ marginBottom: 18 }}>
           <b>Be trackable too.</b> Create your profile so people can book you, and

@@ -161,7 +161,7 @@ export default function Join() {
         <div className="join-hero">
           <h2>Tracking link</h2>
           <p className="sub">{error}</p>
-          <Link className="btn" to="/">Go to Vestigator</Link>
+          <Link className="btn" to="/">Go to Bookking</Link>
         </div>
       </div>
     );
@@ -180,7 +180,7 @@ export default function Join() {
   return (
     <div className="container">
       <div className="join-hero">
-        <span className="hero-badge">Vestigator tracking</span>
+        <span className="hero-badge">Bookking tracking</span>
 
         {arrived ? (
           <>

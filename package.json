@@ -1,5 +1,5 @@
 {
-  "name": "vestigator",
+  "name": "bookking",
   "version": "1.0.0",
   "private": true,
   "workspaces": [
@@ -14,6 +14,12 @@
     "build": "npm run prisma:generate && npm run build -w client",
     "start": "npm run start -w server",
     "test": "node server/auth-test.mjs",
+    "test:schema": "node server/schema-test.mjs",
+    "test:marketplace": "node server/marketplace-test.mjs",
+    "test:services": "node server/services-test.mjs",
+    "test:reviews": "node server/review-test.mjs",
+    "test:availability": "node server/availability-test.mjs",
+    "test:workflow": "node server/workflow-test.mjs",
     "prisma:generate": "npx prisma generate",
     "db:migrate": "npx prisma migrate dev",
     "db:push": "npx prisma db push",

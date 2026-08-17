@@ -1,4 +1,4 @@
-// Vestigator data model — PostgreSQL (Supabase).
+// Bookking data model — PostgreSQL (Supabase).
 //
 // This schema is a faithful port of the previous SQLite schema that lived in
 // server/db.js (tables: users, sessions, bookings, password_resets, profiles).
@@ -28,10 +28,21 @@ model User {
   created_at      BigInt
   failed_attempts Int             @default(0)
   locked_until    BigInt?
+  // Marketplace role (application-level constants: "customer" | "provider" | "both" | "admin").
+  // Enforced at the DB with a CHECK constraint added in the marketplace migration.
+  role            String          @default("customer")
+  // Account status: "active" | "suspended". Suspended users cannot log in.
+  status          String          @default("active")
   sessions        Session[]
   bookings        Booking[]
   passwordResets  PasswordReset[]
   profiles        Profile[]
+  reviews         Review[]
+  messages        Message[]
+  notifications   Notification[]
+  reportsReported Report[]       @relation("ReportReporter")
+  reportsReviewed Report[]       @relation("ReportReviewer")
+  auditLogs       AuditLog[]
 
   @@map("users")
 }
@@ -51,23 +62,49 @@ model Session {
 }
 
 model Booking {
-  id            String  @id
-  user_id       Int
-  share_token   String
-  code          String
-  person_name   String
-  phone         String  @default("")
-  note          String  @default("")
-  pickup        String?
-  destination   String?
-  status        String  @default("pending")
-  created_at    BigInt
-  person_online Boolean @default(false)
-  location      String?
-  path          String  @default("[]")
-  user          User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id             String   @id
+  user_id        Int
+  share_token    String
+  code           String
+  person_name    String
+  phone          String   @default("")
+  note           String   @default("")
+  pickup         String?
+  destination    String?
+  // Marketplace lifecycle. A CHECK constraint in the migration permits both the
+  // legacy tracking statuses (pending, online, in_transit, arrived, cancelled)
+  // and the marketplace statuses
+  // (REQUESTED, ACCEPTED, REJECTED, PROVIDER_EN_ROUTE, ARRIVED, IN_PROGRESS,
+  //  COMPLETED, CANCELLED, EXPIRED).
+  status         String   @default("REQUESTED")
+  created_at     BigInt
+  person_online  Boolean  @default(false)
+  location       String?
+  path           String   @default("[]")
+  // ---- marketplace fields ----
+  profile_id     Int?
+  service_id     Int?
+  price_amount   Int?
+  price_currency String   @default("GHS")
+  accepted_at    BigInt?
+  started_at     BigInt?
+  completed_at   BigInt?
+  expires_at     BigInt?
+  reviewed       Boolean  @default(false)
+  // Manual payment tracking. Provider confirms receipt after receiving cash/MoMo.
+  payment_status String   @default("UNPAID")
+  payment_method String?
+  paid_at        BigInt?
+  platform_fee   Int?
+  user           User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  profile        Profile? @relation(fields: [profile_id], references: [id], onDelete: SetNull)
+  service        Service? @relation(fields: [service_id], references: [id], onDelete: SetNull)
+  reviews        Review[]
+  messages       Message[]
 
   @@index([user_id])
+  @@index([profile_id])
+  @@index([service_id])
   @@map("bookings")
 }
 
@@ -98,8 +135,153 @@ model Profile {
   code_expires_at BigInt
   created_at      BigInt
   updated_at      BigInt
-  user            User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  // ---- marketplace fields ----
+  // Average rating (0..5, null while there are no reviews) and review count.
+  rating_avg      Float?
+  rating_count    Int     @default(0)
+  // Service area, stored as JSON (e.g. {"city": "Accra", "radiusKm": 20}).
+  service_area    String?
+  // IANA timezone the availability windows are expressed in. NULL means not
+  // configured (interpreted as UTC); existing providers are unaffected.
+  timezone        String?
+  // Admin-verified provider identity. Displayed as a trust badge.
+  verified        Boolean  @default(false)
+  user            User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  services        Service[]
+  bookings        Booking[]
+  reviews         Review[]
+  availability    Availability[]
 
   @@index([track_code])
   @@map("profiles")
+}
+
+model Service {
+  id             Int      @id @default(autoincrement())
+  profile_id     Int
+  title          String
+  description    String   @default("")
+  category       String   @default("other")
+  // Prices are stored as integer minor units (e.g. 1500 = 15.00 in the
+  // profile's currency). App-level constants define price_unit:
+  // "flat" | "per_hour" | "per_km" (CHECK-constrained in the migration).
+  price_amount   Int
+  price_currency String   @default("GHS")
+  price_unit     String   @default("flat")
+  duration_min   Int?
+  active         Boolean  @default(true)
+  created_at     BigInt
+  updated_at     BigInt
+  profile        Profile  @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  bookings       Booking[]
+
+  @@index([profile_id])
+  @@index([category])
+  @@index([active])
+  @@map("services")
+}
+
+model Review {
+  id         Int     @id @default(autoincrement())
+  // One review per booking (unique). Rating is CHECK-constrained to 1..5.
+  booking_id String  @unique
+  profile_id Int
+  user_id    Int
+  rating     Int
+  comment    String  @default("")
+  created_at BigInt
+  // Moderation. Hidden reviews are excluded from public provider views.
+  hidden         Boolean  @default(false)
+  hidden_reason  String?
+  booking    Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  profile    Profile @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+  user       User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([profile_id])
+  @@index([user_id])
+  @@map("reviews")
+}
+
+// Recurring weekly availability. dow uses JS Date#getDay() semantics
+// (0 = Sunday .. 6 = Saturday); start_min/end_min are minutes since midnight.
+model Availability {
+  id         Int      @id @default(autoincrement())
+  profile_id Int
+  dow        Int
+  start_min  Int
+  end_min    Int
+  active     Boolean  @default(true)
+  profile    Profile  @relation(fields: [profile_id], references: [id], onDelete: Cascade)
+
+  @@index([profile_id])
+  @@map("availability")
+}
+
+model Message {
+  id         Int     @id @default(autoincrement())
+  booking_id String
+  sender_id  Int
+  body       String
+  created_at BigInt
+  read_at    BigInt?
+  booking    Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  sender     User    @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+
+  @@index([booking_id, created_at])
+  @@index([booking_id, sender_id])
+  @@map("messages")
+}
+
+model Notification {
+  id         Int     @id @default(autoincrement())
+  user_id    Int
+  type       String
+  title      String
+  body       String
+  link       String?
+  ref_type   String?
+  ref_id     String?
+  read_at    BigInt?
+  created_at BigInt
+  user       User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, read_at])
+  @@index([user_id, created_at])
+  @@map("notifications")
+}
+
+// User-generated reports against users, providers, bookings, or reviews.
+model Report {
+  id          Int      @id @default(autoincrement())
+  reporter_id Int
+  target_type String
+  target_id   String
+  reason      String
+  status      String   @default("OPEN")
+  created_at  BigInt
+  reviewed_at BigInt?
+  reviewed_by Int?
+  reporter    User     @relation("ReportReporter", fields: [reporter_id], references: [id], onDelete: Cascade)
+  reviewer    User?    @relation("ReportReviewer", fields: [reviewed_by], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([target_type, target_id])
+  @@map("reports")
+}
+
+// Append-only admin action log. Immutable once written.
+model AuditLog {
+  id          Int     @id @default(autoincrement())
+  admin_id    Int
+  action      String
+  target_type String
+  target_id   String
+  meta        String?
+  created_at  BigInt
+  admin       User    @relation(fields: [admin_id], references: [id], onDelete: Cascade)
+
+  @@index([admin_id])
+  @@index([action])
+  @@index([created_at])
+  @@map("audit_logs")
 }

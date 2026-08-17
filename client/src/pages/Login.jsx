@@ -28,7 +28,7 @@ export default function Login() {
   return (
     <div className="container">
       <div className="join-hero" style={{ maxWidth: 400 }}>
-        <span className="hero-badge">Vestigator · sign in</span>
+        <span className="hero-badge">Bookking · sign in</span>
         <h1 style={{ margin: 0 }}>Welcome back</h1>
         <p className="sub">Sign in to book and track people.</p>
 

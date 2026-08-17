@@ -46,7 +46,7 @@ export default function Reset() {
   return (
     <div className="container">
       <div className="join-hero" style={{ maxWidth: 400 }}>
-        <span className="hero-badge">Vestigator · password reset</span>
+        <span className="hero-badge">Bookking · password reset</span>
         <h1 style={{ margin: 0 }}>Choose a new password</h1>
         <p className="sub">Your other sessions will be signed out for security.</p>
 

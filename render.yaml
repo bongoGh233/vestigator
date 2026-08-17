@@ -1,9 +1,9 @@
-# Render Blueprint — deploy Vestigator as a single always-on web service
+# Render Blueprint — deploy Bookking as a single always-on web service
 # (API + WebSocket + built React client on one port).
 #
 #  1. Push this repo to GitHub (or GitLab).
 #  2. On Render: New > Blueprint  ->  connect your repo. Everything below
-#     is applied automatically and you get a free https://vestigator.onrender.com.
+#     is applied automatically.
 #
 # The database is PostgreSQL hosted on Supabase. Persistence lives in Supabase,
 # not on the Render filesystem. Set DATABASE_URL and DIRECT_URL in the Render
@@ -11,7 +11,7 @@
 # required for the build (prisma generate) and for the running server.
 services:
   - type: web
-    name: vestigator
+    name: bookking
     runtime: node
     repo: https://github.com/bongoGh233/vestigator
     plan: free
